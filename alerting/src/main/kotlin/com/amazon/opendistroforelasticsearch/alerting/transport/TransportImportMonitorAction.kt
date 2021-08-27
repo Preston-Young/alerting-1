@@ -1,5 +1,5 @@
 /*
- *   Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *   Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  *   Licensed under the Apache License, Version 2.0 (the "License").
  *   You may not use this file except in compliance with the License.
@@ -18,11 +18,8 @@ package com.amazon.opendistroforelasticsearch.alerting.transport
 import com.amazon.opendistroforelasticsearch.alerting.action.ImportMonitorAction
 import com.amazon.opendistroforelasticsearch.alerting.action.ImportMonitorRequest
 import com.amazon.opendistroforelasticsearch.alerting.action.ImportMonitorResponse
-import com.amazon.opendistroforelasticsearch.alerting.action.IndexMonitorRequest
 import com.amazon.opendistroforelasticsearch.alerting.core.ScheduledJobIndices
-import com.amazon.opendistroforelasticsearch.alerting.core.model.ScheduledJob
 import com.amazon.opendistroforelasticsearch.alerting.core.model.ScheduledJob.Companion.SCHEDULED_JOBS_INDEX
-import com.amazon.opendistroforelasticsearch.alerting.core.model.ScheduledJob.Companion.SCHEDULED_JOB_TYPE
 import com.amazon.opendistroforelasticsearch.alerting.core.model.SearchInput
 import com.amazon.opendistroforelasticsearch.alerting.model.Monitor
 import com.amazon.opendistroforelasticsearch.alerting.settings.AlertingSettings
@@ -35,7 +32,6 @@ import com.amazon.opendistroforelasticsearch.alerting.settings.DestinationSettin
 import com.amazon.opendistroforelasticsearch.alerting.util.AlertingException
 import com.amazon.opendistroforelasticsearch.alerting.util.IndexUtils
 import com.amazon.opendistroforelasticsearch.alerting.util.checkFilterByUserBackendRoles
-import com.amazon.opendistroforelasticsearch.alerting.util.checkUserFilterByPermissions
 import com.amazon.opendistroforelasticsearch.commons.ConfigConstants
 import com.amazon.opendistroforelasticsearch.commons.authuser.User
 import org.apache.logging.log4j.LogManager
@@ -43,33 +39,25 @@ import org.elasticsearch.ElasticsearchSecurityException
 import org.elasticsearch.ElasticsearchStatusException
 import org.elasticsearch.action.ActionListener
 import org.elasticsearch.action.admin.indices.create.CreateIndexResponse
-import org.elasticsearch.action.get.GetRequest
-import org.elasticsearch.action.get.GetResponse
 import org.elasticsearch.action.index.IndexRequest
 import org.elasticsearch.action.index.IndexResponse
 import org.elasticsearch.action.search.SearchRequest
 import org.elasticsearch.action.search.SearchResponse
 import org.elasticsearch.action.support.ActionFilters
 import org.elasticsearch.action.support.HandledTransportAction
-import org.elasticsearch.action.support.master.AcknowledgedResponse
 import org.elasticsearch.client.Client
 import org.elasticsearch.cluster.service.ClusterService
 import org.elasticsearch.common.inject.Inject
 import org.elasticsearch.common.settings.Settings
 import org.elasticsearch.common.unit.TimeValue
-import org.elasticsearch.common.xcontent.LoggingDeprecationHandler
 import org.elasticsearch.common.xcontent.NamedXContentRegistry
 import org.elasticsearch.common.xcontent.ToXContent
 import org.elasticsearch.common.xcontent.XContentFactory.jsonBuilder
-import org.elasticsearch.common.xcontent.XContentHelper
-import org.elasticsearch.common.xcontent.XContentType
 import org.elasticsearch.index.query.QueryBuilders
-import org.elasticsearch.rest.RestRequest
 import org.elasticsearch.rest.RestStatus
 import org.elasticsearch.search.builder.SearchSourceBuilder
 import org.elasticsearch.tasks.Task
 import org.elasticsearch.transport.TransportService
-import java.io.IOException
 import java.time.Duration
 
 private val log = LogManager.getLogger(TransportImportMonitorAction::class.java)
@@ -125,8 +113,6 @@ class TransportImportMonitorAction @Inject constructor(
         request: ImportMonitorRequest,
         user: User?
     ) {
-        var responseMonitors = mutableListOf<Monitor>()
-
         for (index in request.monitors.indices) {
             val monitor = request.monitors[index]
             val indices = mutableListOf<String>()
@@ -141,7 +127,7 @@ class TransportImportMonitorAction @Inject constructor(
                 override fun onResponse(searchResponse: SearchResponse) {
                     // User has read access to configured indices in the monitor, now create monitor with out user context.
                     client.threadPool().threadContext.stashContext().use {
-                        IndexMonitorHandler(client, actionListener, request, index, monitor, responseMonitors, user).resolveUserAndStart()
+                        IndexMonitorHandler(client, actionListener, request, index, monitor, user).resolveUserAndStart()
                     }
                 }
 
@@ -159,6 +145,7 @@ class TransportImportMonitorAction @Inject constructor(
             })
         }
 
+        var responseMonitors = request.monitors
         actionListener.onResponse(
             ImportMonitorResponse(responseMonitors)
         )
@@ -170,7 +157,6 @@ class TransportImportMonitorAction @Inject constructor(
         private val request: ImportMonitorRequest,
         private val monitorIndex: Int,
         private val monitor: Monitor,
-        private var responseMonitors: MutableList<Monitor>,
         private val user: User?
     ) {
 
@@ -198,18 +184,6 @@ class TransportImportMonitorAction @Inject constructor(
                     }
                 })
             }
-//            else if (!IndexUtils.scheduledJobIndexUpdated) {
-//                IndexUtils.updateIndexMapping(SCHEDULED_JOBS_INDEX, SCHEDULED_JOB_TYPE,
-//                    ScheduledJobIndices.scheduledJobMappings(), clusterService.state(), client.admin().indices(),
-//                    object : ActionListener<AcknowledgedResponse> {
-//                        override fun onResponse(response: AcknowledgedResponse) {
-//                            onUpdateMappingsResponse(response)
-//                        }
-//                        override fun onFailure(t: Exception) {
-//                            actionListener.onFailure(AlertingException.wrap(t))
-//                        }
-//                    })
-//            }
             else {
                 prepareMonitorIndexing()
             }
@@ -224,7 +198,6 @@ class TransportImportMonitorAction @Inject constructor(
 
             // Below check needs to be async operations and needs to be refactored issue#269
             // checkForDisallowedDestinations(allowList)
-
             try {
                 validateActionThrottle(monitor, maxActionThrottle, TimeValue.timeValueMinutes(1))
             } catch (e: RuntimeException) {
@@ -279,7 +252,6 @@ class TransportImportMonitorAction @Inject constructor(
             if (response.isAcknowledged) {
                 log.info("Created $SCHEDULED_JOBS_INDEX with mappings.")
                 prepareMonitorIndexing()
-//                IndexUtils.scheduledJobIndexUpdated()
             } else {
                 log.error("Create $SCHEDULED_JOBS_INDEX mappings call not acknowledged.")
                 actionListener.onFailure(AlertingException.wrap(ElasticsearchStatusException(
@@ -288,26 +260,11 @@ class TransportImportMonitorAction @Inject constructor(
             }
         }
 
-//        private fun onUpdateMappingsResponse(response: AcknowledgedResponse) {
-//            if (response.isAcknowledged) {
-//                log.info("Updated  ${ScheduledJob.SCHEDULED_JOBS_INDEX} with mappings.")
-//                IndexUtils.scheduledJobIndexUpdated()
-//                prepareMonitorIndexing()
-//            } else {
-//                log.error("Update ${ScheduledJob.SCHEDULED_JOBS_INDEX} mappings call not acknowledged.")
-//                actionListener.onFailure(AlertingException.wrap(ElasticsearchStatusException(
-//                    "Updated ${ScheduledJob.SCHEDULED_JOBS_INDEX} mappings call not acknowledged.",
-//                    RestStatus.INTERNAL_SERVER_ERROR))
-//                )
-//            }
-//        }
-
         private fun indexMonitor() {
             request.monitors[monitorIndex] = monitor.copy(schemaVersion = IndexUtils.scheduledJobIndexSchemaVersion)
-            responseMonitors.add(request.monitors[monitorIndex])
 
             val indexRequest = IndexRequest(SCHEDULED_JOBS_INDEX)
-                .source(monitor.toXContent(jsonBuilder(), ToXContent.MapParams(mapOf("with_type" to "true"))))
+                .source(request.monitors[monitorIndex].toXContent(jsonBuilder(), ToXContent.MapParams(mapOf("with_type" to "true"))))
                 .timeout(indexTimeout)
 
             client.index(indexRequest, object : ActionListener<IndexResponse> {
@@ -325,64 +282,6 @@ class TransportImportMonitorAction @Inject constructor(
                 }
             })
         }
-
-//        private fun updateMonitor() {
-//            val getRequest = GetRequest(SCHEDULED_JOBS_INDEX, request.monitorId)
-//            client.get(getRequest, object : ActionListener<GetResponse> {
-//                override fun onResponse(response: GetResponse) {
-//                    if (!response.isExists) {
-//                        actionListener.onFailure(AlertingException.wrap(
-//                            ElasticsearchStatusException("Monitor with ${request.monitorId} is not found", RestStatus.NOT_FOUND)))
-//                        return
-//                    }
-//                    val xcp = XContentHelper.createParser(xContentRegistry, LoggingDeprecationHandler.INSTANCE,
-//                        response.sourceAsBytesRef, XContentType.JSON)
-//                    val monitor = ScheduledJob.parse(xcp, response.id, response.version) as Monitor
-//                    onGetResponse(monitor)
-//                }
-//                override fun onFailure(t: Exception) {
-//                    actionListener.onFailure(AlertingException.wrap(t))
-//                }
-//            })
-//        }
-
-//        private fun onGetResponse(currentMonitor: Monitor) {
-//            if (!checkUserFilterByPermissions(filterByEnabled, user, currentMonitor.user, actionListener, "monitor", request.monitorId)) {
-//                return
-//            }
-//
-//            // If both are enabled, use the current existing monitor enabled time, otherwise the next execution will be
-//            // incorrect.
-//            if (request.monitor.enabled && currentMonitor.enabled)
-//                request.monitor = request.monitor.copy(enabledTime = currentMonitor.enabledTime)
-//
-//            request.monitor = request.monitor.copy(schemaVersion = IndexUtils.scheduledJobIndexSchemaVersion)
-//            val indexRequest = IndexRequest(SCHEDULED_JOBS_INDEX)
-//                .setRefreshPolicy(request.refreshPolicy)
-//                .source(request.monitor.toXContent(jsonBuilder(), ToXContent.MapParams(mapOf("with_type" to "true"))))
-//                .id(request.monitorId)
-//                .setIfSeqNo(request.seqNo)
-//                .setIfPrimaryTerm(request.primaryTerm)
-//                .timeout(indexTimeout)
-//
-//            client.index(indexRequest, object : ActionListener<IndexResponse> {
-//                override fun onResponse(response: IndexResponse) {
-//                    val failureReasons = checkShardsFailure(response)
-//                    if (failureReasons != null) {
-//                        actionListener.onFailure(
-//                            AlertingException.wrap(ElasticsearchStatusException(failureReasons.toString(), response.status())))
-//                        return
-//                    }
-//                    actionListener.onResponse(
-//                        ImportMonitorResponse(response.id, response.version, response.seqNo,
-//                            response.primaryTerm, RestStatus.CREATED, request.monitor)
-//                    )
-//                }
-//                override fun onFailure(t: Exception) {
-//                    actionListener.onFailure(AlertingException.wrap(t))
-//                }
-//            })
-//        }
 
         private fun checkShardsFailure(response: IndexResponse): String? {
             val failureReasons = StringBuilder()

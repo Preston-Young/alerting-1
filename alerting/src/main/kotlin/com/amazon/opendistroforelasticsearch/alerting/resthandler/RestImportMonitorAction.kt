@@ -1,5 +1,5 @@
 /*
- *   Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *   Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  *   Licensed under the Apache License, Version 2.0 (the "License").
  *   You may not use this file except in compliance with the License.
@@ -18,18 +18,12 @@ import com.amazon.opendistroforelasticsearch.alerting.AlertingPlugin
 import com.amazon.opendistroforelasticsearch.alerting.action.ImportMonitorAction
 import com.amazon.opendistroforelasticsearch.alerting.action.ImportMonitorRequest
 import com.amazon.opendistroforelasticsearch.alerting.action.ImportMonitorResponse
-import com.amazon.opendistroforelasticsearch.alerting.core.model.Input
 import com.amazon.opendistroforelasticsearch.alerting.model.Monitor
-import com.amazon.opendistroforelasticsearch.alerting.util.IF_PRIMARY_TERM
-import com.amazon.opendistroforelasticsearch.alerting.util.IF_SEQ_NO
-import com.amazon.opendistroforelasticsearch.alerting.util.REFRESH
 import org.apache.logging.log4j.LogManager
-import org.elasticsearch.action.support.WriteRequest
 import org.elasticsearch.client.node.NodeClient
 import org.elasticsearch.common.xcontent.ToXContent
 import org.elasticsearch.common.xcontent.XContentParser.Token
 import org.elasticsearch.common.xcontent.XContentParserUtils.ensureExpectedToken
-import org.elasticsearch.index.seqno.SequenceNumbers
 import org.elasticsearch.rest.BaseRestHandler
 import org.elasticsearch.rest.BaseRestHandler.RestChannelConsumer
 import org.elasticsearch.rest.BytesRestResponse
@@ -67,21 +61,15 @@ class RestImportMonitorAction : BaseRestHandler() {
         // Create list of Monitor objects
         var monitors = mutableListOf<Monitor>()
 
-        // Validate request by parsing JSON to Monitor
+        // Validate request by parsing JSON to list of Monitor objects
         val xcp = request.contentParser()
         ensureExpectedToken(Token.START_OBJECT, xcp.nextToken(), xcp)
-        while (xcp.nextToken() != Token.END_OBJECT) {
-            val fieldName = xcp.currentName()
-
-            if (fieldName == "monitors") {
-                ensureExpectedToken(Token.START_ARRAY, xcp.currentToken(), xcp)
-                while (xcp.nextToken() != Token.END_ARRAY) {
-                    monitors.add(Monitor.parse(xcp).copy(lastUpdateTime = Instant.now()))
-                }
-            } else {
-                xcp.skipChildren()
-            }
+        ensureExpectedToken(Token.FIELD_NAME, xcp.nextToken(), xcp)
+        ensureExpectedToken(Token.START_ARRAY, xcp.nextToken(), xcp)
+        while (xcp.nextToken() != Token.END_ARRAY) {
+            monitors.add(Monitor.parse(xcp).copy(lastUpdateTime = Instant.now()))
         }
+        ensureExpectedToken(Token.END_OBJECT, xcp.nextToken(), xcp)
 
         val importMonitorRequest = ImportMonitorRequest(monitors)
 
@@ -96,7 +84,7 @@ class RestImportMonitorAction : BaseRestHandler() {
             @Throws(Exception::class)
             override fun buildResponse(response: ImportMonitorResponse): RestResponse {
                 val restResponse = BytesRestResponse(RestStatus.CREATED, response.toXContent(channel.newBuilder(), ToXContent.EMPTY_PARAMS))
-                val location = "${AlertingPlugin.MONITOR_BASE_URI}/import/"
+                val location = "${AlertingPlugin.MONITOR_BASE_URI}/import"
                 restResponse.addHeader("Location", location)
                 return restResponse
             }
