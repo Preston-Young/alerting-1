@@ -15,6 +15,7 @@
 
 package com.amazon.opendistroforelasticsearch.alerting.action
 
+import com.amazon.opendistroforelasticsearch.alerting.model.Monitor
 import org.elasticsearch.action.ActionResponse
 import org.elasticsearch.common.io.stream.StreamInput
 import org.elasticsearch.common.io.stream.StreamOutput
@@ -23,41 +24,29 @@ import org.elasticsearch.common.xcontent.ToXContentObject
 import org.elasticsearch.common.xcontent.XContentBuilder
 import java.io.IOException
 
-class ImportMonitorResponse : ActionResponse, ToXContentObject {
-    var total: Int
-    var successful: Int
-    var failed: Int
+class ExportMonitorResponse : ActionResponse, ToXContentObject {
+    var monitors: MutableList<Monitor>
 
     constructor(
-        total: Int,
-        successful: Int,
-        failed: Int
+        monitors: MutableList<Monitor>
     ) : super() {
-        this.total = total
-        this.successful = successful
-        this.failed = failed
+        this.monitors = monitors
     }
 
     @Throws(IOException::class)
     constructor(sin: StreamInput) : this(
-        sin.readInt(), // total
-        sin.readInt(), // successful
-        sin.readInt() // failed
+        sin.readList(::Monitor) as MutableList<Monitor> // monitors
     )
 
     @Throws(IOException::class)
     override fun writeTo(out: StreamOutput) {
-        out.writeInt(total)
-        out.writeInt(successful)
-        out.writeInt(failed)
+        out.writeList(monitors)
     }
 
     @Throws(IOException::class)
     override fun toXContent(builder: XContentBuilder, params: ToXContent.Params): XContentBuilder {
         return builder.startObject()
-            .field("total", total)
-            .field("successful", successful)
-            .field("failed", failed)
+            .field("monitors", monitors)
             .endObject()
     }
 }

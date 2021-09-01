@@ -15,25 +15,18 @@
 
 package com.amazon.opendistroforelasticsearch.alerting.action
 
-import com.amazon.opendistroforelasticsearch.alerting.model.Monitor
 import org.elasticsearch.action.ActionRequest
 import org.elasticsearch.action.ActionRequestValidationException
 import org.elasticsearch.common.io.stream.StreamInput
 import org.elasticsearch.common.io.stream.StreamOutput
 import java.io.IOException
 
-class ImportMonitorRequest : ActionRequest {
-    var monitors: MutableList<Monitor>
-
+class ExportMonitorRequest : ActionRequest {
     constructor(
-        monitors: MutableList<Monitor>
-    ): super() {
-        this.monitors = monitors
-    }
+    ): super()
 
     @Throws(IOException::class)
     constructor(sin: StreamInput): this(
-        monitors = sin.readList(::Monitor) as MutableList<Monitor>
     )
 
     override fun validate(): ActionRequestValidationException? {
@@ -42,8 +35,5 @@ class ImportMonitorRequest : ActionRequest {
 
     @Throws(IOException::class)
     override fun writeTo(out: StreamOutput) {
-        this.monitors.forEach{ monitor ->
-            monitor.writeTo(out)
-        }
     }
 }
