@@ -14,27 +14,16 @@
  */
 package com.amazon.opendistroforelasticsearch.alerting.resthandler
 
-import com.amazon.opendistroforelasticsearch.alerting.ALERTING_BASE_URI
-import com.amazon.opendistroforelasticsearch.alerting.ANOMALY_DETECTOR_INDEX
-import com.amazon.opendistroforelasticsearch.alerting.AlertingRestTestCase
+import com.amazon.opendistroforelasticsearch.alerting.*
 import com.amazon.opendistroforelasticsearch.alerting.alerts.AlertIndices
-import com.amazon.opendistroforelasticsearch.alerting.anomalyDetectorIndexMapping
+import com.amazon.opendistroforelasticsearch.alerting.core.ScheduledJobIndices
 import com.amazon.opendistroforelasticsearch.alerting.core.model.CronSchedule
 import com.amazon.opendistroforelasticsearch.alerting.core.model.ScheduledJob
 import com.amazon.opendistroforelasticsearch.alerting.core.model.SearchInput
 import com.amazon.opendistroforelasticsearch.alerting.core.settings.ScheduledJobSettings
-import com.amazon.opendistroforelasticsearch.alerting.makeRequest
 import com.amazon.opendistroforelasticsearch.alerting.model.Alert
 import com.amazon.opendistroforelasticsearch.alerting.model.Monitor
 import com.amazon.opendistroforelasticsearch.alerting.model.Trigger
-import com.amazon.opendistroforelasticsearch.alerting.randomADMonitor
-import com.amazon.opendistroforelasticsearch.alerting.randomAction
-import com.amazon.opendistroforelasticsearch.alerting.randomAlert
-import com.amazon.opendistroforelasticsearch.alerting.randomAnomalyDetector
-import com.amazon.opendistroforelasticsearch.alerting.randomAnomalyDetectorWithUser
-import com.amazon.opendistroforelasticsearch.alerting.randomMonitor
-import com.amazon.opendistroforelasticsearch.alerting.randomThrottle
-import com.amazon.opendistroforelasticsearch.alerting.randomTrigger
 import com.amazon.opendistroforelasticsearch.alerting.settings.AlertingSettings
 import org.apache.http.HttpHeaders
 import org.apache.http.entity.ContentType
@@ -44,9 +33,7 @@ import org.elasticsearch.client.ResponseException
 import org.elasticsearch.client.WarningFailureException
 import org.elasticsearch.common.bytes.BytesReference
 import org.elasticsearch.common.unit.TimeValue
-import org.elasticsearch.common.xcontent.ToXContent
-import org.elasticsearch.common.xcontent.XContentBuilder
-import org.elasticsearch.common.xcontent.XContentType
+import org.elasticsearch.common.xcontent.*
 import org.elasticsearch.index.query.QueryBuilders
 import org.elasticsearch.rest.RestStatus
 import org.elasticsearch.script.Script
@@ -54,6 +41,8 @@ import org.elasticsearch.search.builder.SearchSourceBuilder
 import org.elasticsearch.test.ESTestCase
 import org.elasticsearch.test.junit.annotations.TestLogging
 import org.elasticsearch.test.rest.ESRestTestCase
+import org.junit.Assert
+import java.time.Instant
 import java.time.ZoneId
 import java.time.temporal.ChronoUnit
 
@@ -808,5 +797,105 @@ class MonitorRestApiIT : AlertingRestTestCase() {
         val action = randomAction().copy(throttle = throttle)
         val trigger = randomTrigger(actions = listOf(action))
         return randomMonitor(triggers = listOf(trigger))
+    }
+
+    @Throws(Exception::class)
+    fun `test importing monitors`() {
+        val NUM_MONITORS = 3
+        var monitors = mutableListOf<Monitor>()
+
+        for (i in 1..NUM_MONITORS) {
+            monitors.add(randomMonitorWithoutUser())
+        }
+
+        // TODO: Figure out error for import API call.
+        //  Search response returns correctly, so the error must be in the payload given to the API call.
+        val importResponse = client()
+            .makeRequest("POST", "$ALERTING_BASE_URI/import", emptyMap(), monitors.toHttpEntity())
+
+        // Verify that request was successful
+        assertEquals("Importing monitors request failed", RestStatus.CREATED, importResponse.restStatus())
+
+        // Verify that response returns a total of NUM_MONITORS created
+        val total = importResponse.asMap()["total"] as Int
+        assertEquals("Total monitors in response doesn't match number of monitors passed to import API", NUM_MONITORS, total)
+
+        refreshIndex("*")
+
+        // Verify that all monitors were created
+        val search = SearchSourceBuilder()
+            .query(QueryBuilders.termQuery("${Monitor.MONITOR_TYPE}.type", Monitor.MONITOR_TYPE))
+            .toString()
+
+        val searchResponse = client().makeRequest(
+            "GET",
+            "$ALERTING_BASE_URI/_search",
+            emptyMap(),
+            NStringEntity(search, ContentType.APPLICATION_JSON))
+
+        val xcp = createParser(XContentType.JSON.xContent(), searchResponse.entity.content)
+        val hits = xcp.map()["hits"]!! as Map<String, Map<String, Any>>
+        val numberDocsFound = hits["total"]?.get("value")
+
+        assertEquals("Not all monitors created successfully", NUM_MONITORS, numberDocsFound)
+    }
+
+    fun `test importing erroneous monitors`() {
+        try {
+            // Add one valid and one invalid monitor
+            var monitors = mutableListOf<Monitor>()
+            monitors.add(randomMonitor())
+
+            val si = SearchInput(listOf("_#*IllegalIndexCharacters"), SearchSourceBuilder().query(QueryBuilders.matchAllQuery()))
+            val monitor = randomMonitor().copy(inputs = listOf(si))
+
+            monitors.add(monitor)
+
+            client().makeRequest("POST", "$ALERTING_BASE_URI/import", emptyMap(), monitors.toHttpEntity())
+        } catch (e: ResponseException) {
+            // When an index with invalid name is mentioned, instead of returning invalid_index_name_exception security
+                // plugin throws security_exception.
+            // Refer: https://github.com/opendistro-for-elasticsearch/security/issues/718
+            // Without security plugin we get BAD_REQUEST correctly. With security_plugin we get INTERNAL_SERVER_ERROR,
+                // till above issue is fixed.
+            assertTrue("Unexpected status",
+                listOf<RestStatus>(RestStatus.BAD_REQUEST, RestStatus.FORBIDDEN).contains(e.response.restStatus()))
+        }
+    }
+
+    fun `test exporting monitors`() {
+        val NUM_MONITORS = 3
+
+        for (i in 1..NUM_MONITORS) {
+            createRandomMonitor(true)
+        }
+
+        val exportResponse = client()
+            .makeRequest("GET", "$ALERTING_BASE_URI/export", null,
+                BasicHeader(HttpHeaders.CONTENT_TYPE, "application/json"))
+
+        // Verify that request was successful
+        assertEquals("Importing monitors request failed", RestStatus.OK, exportResponse.restStatus())
+
+        // Create list of Monitor objects
+        var responseMonitors = mutableListOf<Monitor>()
+
+        // Parsing JSON to list of Monitor objects
+        val xcp = createParser(XContentType.JSON.xContent(), exportResponse.entity.content)
+        XContentParserUtils.ensureExpectedToken(XContentParser.Token.START_OBJECT, xcp.nextToken(), xcp)
+        XContentParserUtils.ensureExpectedToken(XContentParser.Token.FIELD_NAME, xcp.nextToken(), xcp)
+        XContentParserUtils.ensureExpectedToken(XContentParser.Token.START_ARRAY, xcp.nextToken(), xcp)
+        while (xcp.nextToken() != XContentParser.Token.END_ARRAY) {
+            responseMonitors.add(Monitor.parse(xcp).copy(lastUpdateTime = Instant.now()))
+        }
+        XContentParserUtils.ensureExpectedToken(XContentParser.Token.END_OBJECT, xcp.nextToken(), xcp)
+
+        // Ensure all monitors are returned
+        assertEquals("Number of monitors exported does not match number of monitors imported", NUM_MONITORS, responseMonitors.size)
+
+    }
+
+    fun `test round trip import and export`() {
+
     }
 }
